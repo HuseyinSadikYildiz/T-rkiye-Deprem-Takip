@@ -1,111 +1,4 @@
-<?php
-// Database configuration
-define('DB_HOST', 'sql200.infinityfree.com');
-define('DB_USER', 'if0_41279922');
-define('DB_PASS', 'Neizlesem');
-define('DB_NAME', 'if0_41279922_deprem_db');
-
-// Scraper settings
-define('KANDILLI_URL', 'http://www.koeri.boun.edu.tr/scripts/lst0.asp');
-define('AUTO_REFRESH_INTERVAL', 30000); // 30 seconds
-
-// Database Connection Setup
-try {
-    $pdo = new PDO(
-        "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8mb4",
-        DB_USER,
-        DB_PASS,
-        [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]
-    );
-    
-    // Create table automatically if it doesn't exist
-    $sql = "CREATE TABLE IF NOT EXISTS earthquakes (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        date DATE NOT NULL,
-        time TIME NOT NULL,
-        latitude DECIMAL(10,8) NOT NULL,
-        longitude DECIMAL(11,8) NOT NULL,
-        depth DECIMAL(5,2) NOT NULL,
-        magnitude DECIMAL(3,1) NOT NULL,
-        location VARCHAR(255) NOT NULL,
-        status VARCHAR(100),
-        hash CHAR(64) UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB;";
-    
-    $pdo->exec($sql);
-
-} catch (PDOException $e) {
-    die("Connection failed: " . $e->getMessage());
-}
-
-// Scraper Logic
-function runKandilliScraper($pdo) {
-    $url = KANDILLI_URL;
-    $content = @file_get_contents($url);
-    if ($content === false) return 0;
-    
-    if (preg_match('/<pre>(.*?)<\/pre>/s', $content, $matches)) {
-        $lines = explode("\n", $matches[1]);
-        $count = 0;
-        
-        $stmt = $pdo->prepare("INSERT IGNORE INTO earthquakes (date, time, latitude, longitude, depth, magnitude, location, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-        
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line) || !preg_match('/^\d{4}\.\d{2}\.\d{2}/', $line)) continue;
-            
-            $date      = substr($line, 0, 10);
-            $time      = substr($line, 11, 8);
-            $lat       = substr($line, 21, 7);
-            $lng       = substr($line, 30, 7);
-            $depth     = substr($line, 45, 4);
-            $ml        = (float)substr($line, 60, 3);
-            $location  = trim(substr($line, 71, 50));
-            
-            $hash = hash('sha256', $date . $time . $location . $lat . $lng);
-            
-            $stmt->execute([
-                str_replace('.', '-', $date),
-                $time,
-                (float)$lat,
-                (float)$lng,
-                (float)$depth,
-                $ml,
-                $location,
-                $hash
-            ]);
-            $count++;
-        }
-        return $count;
-    }
-    return 0;
-}
-
-// API Endpoint (JSON response when ?action=get_data is called)
-if (isset($_GET['action']) && $_GET['action'] === 'get_data') {
-    header('Content-Type: application/json; charset=utf-8');
-    
-    // Fetch new data from Kandilli via internal function
-    runKandilliScraper($pdo);
-    
-    // Get the latest 500 earthquakes to provide enough data for filters
-    $sql = "SELECT id, date, time, latitude, longitude, depth, magnitude, location FROM earthquakes ORDER BY date DESC, time DESC LIMIT 500";
-    $stmt = $pdo->query($sql);
-    $earthquakes = $stmt->fetchAll();
-    
-    echo json_encode([
-        "success" => true,
-        "last_update" => date('Y-m-d H:i:s'),
-        "data" => $earthquakes
-    ]);
-    exit; // Halt execution so HTML isn't outputted
-}
-?><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
@@ -609,10 +502,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_data') {
     <!-- Inline Script (Originally assets/js/app.js) -->
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // API and State
-            const API_URL = '?action=get_data';
+            // API and State (Using public third-party JSON API for Kandilli data)
+            const API_URL = 'https://api.orhanaydogdu.com.tr/deprem/kandilli/live';
             let mapMarkers = [];
-            let earthquakeData = []; // Raw data from API
+            let earthquakeData = []; // Raw data mapped from API
             let filteredData = [];   // Data currently shown
             let map;
             
@@ -653,18 +546,36 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_data') {
                 setupEventListeners();
             }
             
-            // Fetch Data
+            // Fetch Data from Public API
             async function fetchData() {
                 statusMsgEl.innerText = 'Güncelleniyor...';
                 try {
                     const response = await fetch(API_URL);
                     const result = await response.json();
                     
-                    if (result.success) {
-                        earthquakeData = result.data;
-                        updateTimeEl.innerText = result.last_update.split(' ')[1];
+                    if (result.status && result.result) {
+                        // Map the API results to match our filter and UI structure
+                        earthquakeData = result.result.map(eq => {
+                            const parts = eq.date_time.split(' ');
+                            return {
+                                id: eq.earthquake_id,
+                                date: parts[0],
+                                time: parts[1],
+                                latitude: eq.geojson.coordinates[1],
+                                longitude: eq.geojson.coordinates[0],
+                                depth: eq.depth,
+                                magnitude: eq.mag,
+                                location: eq.title
+                            };
+                        });
+                        
+                        // Set last update to current time
+                        const now = new Date();
+                        updateTimeEl.innerText = now.toTimeString().split(' ')[0];
                         applyFilters(); // Apply current filters to new data
                         statusMsgEl.innerText = 'Canlı Veri';
+                    } else {
+                        statusMsgEl.innerText = 'Hata: Boş Veri';
                     }
                 } catch (error) {
                     console.error('Fetch Error:', error);
